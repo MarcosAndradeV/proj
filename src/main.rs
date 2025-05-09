@@ -1,5 +1,6 @@
 use clap::Parser;
 use lexer::{PeekableLexer, Token, TokenKind};
+use std::collections::HashSet;
 use std::path::Path;
 use std::{collections::HashMap, fs, process};
 
@@ -183,12 +184,57 @@ enum Command {
     Load(String),
 }
 
+fn resolve_dependencies(
+    blocks: &HashMap<String, Block>,
+    directive: &str,
+) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    let mut ordered = Vec::new();
+
+    fn resolve_dependencies_impl<'same>(
+        blocks: &'same HashMap<String, Block>,
+        directive: &'same str,
+        seen: &mut HashSet<&'same str>,
+        ordered: &mut Vec<String>,
+    ) -> Result<(), String> {
+        let seen_contains = seen.contains(directive);
+        if seen_contains && ordered.iter().find(|o| o.as_str() == directive).is_none() {
+            error!("Circular dependency detected at '{directive}'")
+        }
+
+        if seen_contains {
+            return Ok(());
+        }
+        seen.insert(directive);
+
+        match blocks.get(directive) {
+            Some(b) => {
+                for c in b.commands.iter() {
+                    match c {
+                        Command::Load(dep) => {
+                            resolve_dependencies_impl(blocks, dep, seen, ordered)?;
+                        }
+                        _ => {}
+                    }
+                }
+                ordered.push(directive.into());
+                Ok(())
+            }
+            None => error!("Directive '{directive}' not found."),
+        }
+    }
+    resolve_dependencies_impl(blocks, directive, &mut seen, &mut ordered)?;
+    Ok(())
+}
+
 fn run_commands(directive: String, blocks: HashMap<String, Block>) -> Result<(), String> {
     let mut stack = Stack::default();
 
     let Some(block) = blocks.get(&directive) else {
         error!("Directive '{}' not found.", directive);
     };
+
+    resolve_dependencies(&blocks, &directive)?;
 
     for cmd in &block.commands {
         run_cmd(&mut stack, &blocks, cmd)?;
