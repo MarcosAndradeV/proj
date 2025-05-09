@@ -275,7 +275,7 @@ fn run_cmd(
 
         Command::Load(block_name) => {
             let Some(b) = blocks.get(block_name) else {
-                error!("load: block '{}' not found", block_name);
+                error!("load block '{}' not found", block_name);
             };
 
             for cmd in &b.commands {
