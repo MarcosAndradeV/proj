@@ -260,13 +260,11 @@ impl<'src> Lexer<'src> {
             }
             self.advance();
         }
-        match &self.source[begin..self.pos] {
-            _ => Token::new(
-                TokenKind::Identifier,
-                loc,
-                self.source[begin..self.pos].into(),
-            ),
-        }
+        Token::new(
+            TokenKind::Identifier,
+            loc,
+            self.source[begin..self.pos].into(),
+        )
     }
 
     fn lex_number(&mut self, begin: usize) -> Token {
