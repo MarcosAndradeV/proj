@@ -126,9 +126,23 @@ fn parse_block(l: &mut PeekableLexer<'_>) -> Result<Block, String> {
                 "concat" => block.commands.push(Command::Concat),
                 "readfile" => block.commands.push(Command::ReadFile),
                 "writefile" => block.commands.push(Command::WriteFile),
+                "if" => {
+                    let inner = parse_block(l)?;
+                    block.commands.push(Command::If(inner.commands));
+                }
+                "load" => {
+                    let id_token = expect_token(l, TokenKind::Identifier)?;
+                    block.commands.push(Command::Load(id_token.source));
+                }
                 _ => error!("Unexpected identifier: {}", t.source),
             },
-            _ => todo!(),
+            TokenKind::Macro => match t.source.as_str() {
+                "log_shell" => block
+                    .commands
+                    .extend([Command::Dup, Command::Echo, Command::Shell]),
+                _ => error!("Unexpected macro: {}", t.source),
+            },
+            _ => error!("Unexpected Token: {:?} '{}'", t.kind, t.source),
         }
     }
 
@@ -167,6 +181,10 @@ enum Command {
     ReadFile,
     /// Writes the top of stack (string) to a file, path below it
     WriteFile,
+    // Check if the top of stack is true and execute the block
+    If(Vec<Command>),
+    // Load another block
+    Load(String),
 }
 
 fn run_commands(directive: String, blocks: HashMap<String, Block>) -> Result<(), String> {
@@ -177,73 +195,120 @@ fn run_commands(directive: String, blocks: HashMap<String, Block>) -> Result<(),
     };
 
     for cmd in &block.commands {
-        match cmd {
-            Command::PushStr(s) => {
-                stack.push(Value::Str(s.clone()));
-            }
+        run_cmd(&mut stack, &blocks, cmd)?;
+    }
+    Ok(())
+}
 
-            Command::PushInt(s) => {
-                stack.push(Value::Int(s.clone()));
-            }
-
-            Command::Echo => match stack.pop_string() {
-                Ok(s) => println!("{}", s),
-                Err(err) => error!("{}", err),
-            },
-
-            Command::Dup => match stack.top() {
-                Some(s) => stack.push(s.clone()),
-                None => error!("Dup with a empty stack"),
-            },
-
-            Command::Pop => match stack.pop() {
-                Some(_) => {}
-                None => error!("Pop with a empty stack"),
-            },
-
-            Command::Swap => match (stack.pop(), stack.pop()) {
-                (Some(a), Some(b)) => {
-                    stack.push(b);
-                    stack.push(a);
-                }
-                (None, _) | (_, None) => error!("Swap with less than 2 elements"),
-                (None, None) => error!("Swap with a empty stack"),
-            },
-
-            Command::Concat => match (stack.pop_string(), stack.pop_string()) {
-                (Ok(a), Ok(b)) => {
-                    stack.push(Value::Str(b + a.as_str()));
-                }
-                (Err(err), _) | (_, Err(err)) => {
-                    error!("Concat with less than 2 elements or {}", err)
-                }
-                (Err(err1), Err(err2)) => {
-                    error!("Concat with a empty stack: {} and {}", err1, err2)
-                }
-            },
-            Command::ReadFile => todo!("Not sure if i should add this"),
-            Command::WriteFile => todo!("Not sure if i should add this"),
-
-            Command::Shell => match stack.pop_string() {
-                Ok(cmd) => match SysCommand::new("sh").arg("-c").arg(&cmd).output() {
-                    Ok(output) => {
-                        if output.status.success() {
-                            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                            stack.push(Value::Str(stdout));
-                        } else {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            error!("Shell error: {}", stderr);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to run shell: {}", e);
-                    }
-                },
-                Err(err) => {
-                    error!("{}", err)
-                }
-            },
+fn run_cmd(
+    stack: &mut Stack,
+    blocks: &HashMap<String, Block>,
+    cmd: &Command,
+) -> Result<(), String> {
+    match cmd {
+        Command::PushStr(s) => {
+            stack.push(Value::Str(s.clone()));
         }
+
+        Command::PushInt(s) => {
+            stack.push(Value::Int(s.clone()));
+        }
+
+        Command::Echo => match stack.pop_string() {
+            Ok(s) => println!("{}", s),
+            Err(err) => error!("{}", err),
+        },
+
+        Command::Dup => match stack.top() {
+            Some(s) => stack.push(s.clone()),
+            None => error!("Dup with a empty stack"),
+        },
+
+        Command::Pop => match stack.pop() {
+            Some(_) => {}
+            None => error!("Pop with a empty stack"),
+        },
+
+        Command::Swap => match (stack.pop(), stack.pop()) {
+            (Some(a), Some(b)) => {
+                stack.push(b);
+                stack.push(a);
+            }
+            (None, _) | (_, None) => error!("Swap with less than 2 elements"),
+        },
+
+        Command::Concat => match (stack.pop_string(), stack.pop_string()) {
+            (Ok(a), Ok(b)) => {
+                stack.push(Value::Str(b + a.as_str()));
+            }
+            (Err(err), _) | (_, Err(err)) => {
+                error!("Concat with less than 2 elements or {}", err)
+            }
+            (Err(err1), Err(err2)) => {
+                error!("Concat with a empty stack: {} and {}", err1, err2)
+            }
+        },
+
+        Command::ReadFile => match stack.pop_string() {
+            Ok(path) => match fs::read_to_string(&path) {
+                Ok(content) => stack.push(Value::Str(content)),
+                Err(e) => error!("readfile error: {}", e),
+            },
+            Err(e) => error!("{}", e),
+        },
+
+        Command::WriteFile => {
+            let content = stack.pop_string()?;
+            let path = stack.pop_string()?;
+            match fs::write(&path, content) {
+                Ok(_) => {}
+                Err(e) => error!("writefile error: {}", e),
+            }
+        }
+
+        Command::If(cmds) => {
+            let cond = match stack.pop() {
+                Some(Value::Int(v)) => v,
+                Some(v) => error!("if expected Int on stack, got {}", v.type_name()),
+                None => error!("if with empty stack"),
+            };
+
+            if cond != 0 {
+                for cmd in cmds {
+                    run_cmd(stack, blocks, cmd)?;
+                }
+            }
+        }
+
+        Command::Load(block_name) => {
+            let Some(b) = blocks.get(block_name) else {
+                error!("load: block '{}' not found", block_name);
+            };
+
+            for cmd in &b.commands {
+                run_cmd(stack, blocks, cmd)?;
+            }
+        }
+
+        Command::Shell => match stack.pop_string() {
+            Ok(cmd) => match SysCommand::new("sh").arg("-c").arg(&cmd).output() {
+                Ok(output) => {
+                    if output.status.success() {
+                        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        println!("Shell '{cmd}'\n{}", stdout)
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        error!("Shell '{cmd}'\nstderr:\n{}", stderr);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to run shell: {}", e);
+                }
+            },
+            Err(err) => {
+                error!("{}", err)
+            }
+        },
     }
     Ok(())
 }
@@ -254,6 +319,16 @@ pub enum Value {
     Nil,
     Str(String),
     Int(i64),
+}
+
+impl Value {
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Nil => "Nil",
+            Value::Str(_) => "Str",
+            Value::Int(_) => "Int",
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -273,7 +348,7 @@ impl Stack {
     pub fn pop_string(&mut self) -> Result<String, String> {
         match self.inner.pop() {
             Some(Value::Str(s)) => return Ok(s),
-            Some(v) => error!("the value '{v:?}' is not a string."), // TODO: add Value::type_name()
+            Some(v) => error!("expected string but got {}", v.type_name()),
             None => error!("stack is empty."),
         }
     }
