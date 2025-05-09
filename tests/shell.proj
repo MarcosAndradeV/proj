@@ -1,0 +1,6 @@
+main {
+    "ech1o Hello" shell ifnot {
+        @log_fatal
+    }
+    echo
+}
