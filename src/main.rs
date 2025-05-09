@@ -113,12 +113,19 @@ fn parse_block(l: &mut PeekableLexer<'_>) -> Result<Block, String> {
                 block.commands.push(Command::PushStr(t.source));
             }
             TokenKind::Integer => {
-                block.commands.push(Command::PushInt(t.source.parse().map_err(|err| format!("{err}"))?));
+                block.commands.push(Command::PushInt(
+                    t.source.parse().map_err(|err| format!("{err}"))?,
+                ));
             }
             TokenKind::Identifier => match t.source.as_str() {
                 "echo" => block.commands.push(Command::Echo),
                 "shell" => block.commands.push(Command::Shell),
                 "dup" => block.commands.push(Command::Dup),
+                "pop" => block.commands.push(Command::Pop),
+                "swap" => block.commands.push(Command::Swap),
+                "concat" => block.commands.push(Command::Concat),
+                "readfile" => block.commands.push(Command::ReadFile),
+                "writefile" => block.commands.push(Command::WriteFile),
                 _ => error!("Unexpected identifier: {}", t.source),
             },
             _ => todo!(),
@@ -160,10 +167,6 @@ enum Command {
     ReadFile,
     /// Writes the top of stack (string) to a file, path below it
     WriteFile,
-    /// Compare top two strings; pushes "true" or "false"
-    Eq,
-    /// Conditional execution — if top of stack is "true", execute next block
-    If(String), // name of block to invoke
 }
 
 fn run_commands(directive: String, blocks: HashMap<String, Block>) -> Result<(), String> {
@@ -176,11 +179,11 @@ fn run_commands(directive: String, blocks: HashMap<String, Block>) -> Result<(),
     for cmd in &block.commands {
         match cmd {
             Command::PushStr(s) => {
-                stack.push(Value::Scalar(Data::Str(s.clone())));
+                stack.push(Value::Str(s.clone()));
             }
 
             Command::PushInt(s) => {
-                stack.push(Value::Scalar(Data::Int(s.clone())));
+                stack.push(Value::Int(s.clone()));
             }
 
             Command::Echo => match stack.pop_string() {
@@ -188,12 +191,45 @@ fn run_commands(directive: String, blocks: HashMap<String, Block>) -> Result<(),
                 Err(err) => error!("{}", err),
             },
 
+            Command::Dup => match stack.top() {
+                Some(s) => stack.push(s.clone()),
+                None => error!("Dup with a empty stack"),
+            },
+
+            Command::Pop => match stack.pop() {
+                Some(_) => {}
+                None => error!("Pop with a empty stack"),
+            },
+
+            Command::Swap => match (stack.pop(), stack.pop()) {
+                (Some(a), Some(b)) => {
+                    stack.push(b);
+                    stack.push(a);
+                }
+                (None, _) | (_, None) => error!("Swap with less than 2 elements"),
+                (None, None) => error!("Swap with a empty stack"),
+            },
+
+            Command::Concat => match (stack.pop_string(), stack.pop_string()) {
+                (Ok(a), Ok(b)) => {
+                    stack.push(Value::Str(b + a.as_str()));
+                }
+                (Err(err), _) | (_, Err(err)) => {
+                    error!("Concat with less than 2 elements or {}", err)
+                }
+                (Err(err1), Err(err2)) => {
+                    error!("Concat with a empty stack: {} and {}", err1, err2)
+                }
+            },
+            Command::ReadFile => todo!("Not sure if i should add this"),
+            Command::WriteFile => todo!("Not sure if i should add this"),
+
             Command::Shell => match stack.pop_string() {
                 Ok(cmd) => match SysCommand::new("sh").arg("-c").arg(&cmd).output() {
                     Ok(output) => {
                         if output.status.success() {
                             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                            stack.push(Value::Scalar(Data::Str(stdout)));
+                            stack.push(Value::Str(stdout));
                         } else {
                             let stderr = String::from_utf8_lossy(&output.stderr);
                             error!("Shell error: {}", stderr);
@@ -207,13 +243,6 @@ fn run_commands(directive: String, blocks: HashMap<String, Block>) -> Result<(),
                     error!("{}", err)
                 }
             },
-
-            Command::Dup => match stack.top() {
-                Some(s) => stack.push(s.clone()),
-                None => error!("Dup with a empty stack"),
-            },
-
-            _ => todo!()
         }
     }
     Ok(())
@@ -223,14 +252,8 @@ fn run_commands(directive: String, blocks: HashMap<String, Block>) -> Result<(),
 pub enum Value {
     #[default]
     Nil,
-    Scalar(Data),
-    Vec1D(Vec<Data>),
-}
-
-#[derive(Debug, Clone)]
-pub enum Data {
     Str(String),
-    Int(i64)
+    Int(i64),
 }
 
 #[derive(Debug, Default)]
@@ -249,7 +272,7 @@ impl Stack {
 
     pub fn pop_string(&mut self) -> Result<String, String> {
         match self.inner.pop() {
-            Some(Value::Scalar(Data::Str(s))) => return Ok(s),
+            Some(Value::Str(s)) => return Ok(s),
             Some(v) => error!("the value '{v:?}' is not a string."), // TODO: add Value::type_name()
             None => error!("stack is empty."),
         }
