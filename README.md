@@ -28,18 +28,6 @@ main {
 * Each **block** starts with an identifier (directive name) followed by `{`.
 * Commands inside blocks are interpreted in order.
 * Duplicate block names are disallowed.
-* Tokens include: Identifiers, String literals, Integers, and Macros.
-
----
-
-## 🔣 Token Types
-
-| Type          | Description                                    |
-| ------------- | ---------------------------------------------- |
-| Identifier    | Used for block names and command keywords      |
-| StringLiteral | `"A string"` – pushed to stack as `Value::Str` |
-| Integer       | `123` – pushed as `Value::Int(i64)`            |
-| Macro         | Expands to the defined set of commands         |
 
 ---
 
@@ -83,43 +71,6 @@ This will:
 2. Duplicate it.
 3. Echo it to stdout.
 4. Run it with the shell and print the result.
-
----
-
-## 🧵 Runtime Execution
-
-The `.proj` runtime works by:
-
-1. Loading the `.proj` file into a map of `HashMap<String, Block>`.
-2. Locating the block by directive name (e.g., `main`).
-3. Executing the list of `Command`s in that block using a LIFO stack (`Vec<Value>`).
-4. Supporting nested execution via `load` and conditional blocks via `if`.
-
----
-
-## 🧱 Runtime Stack
-
-Backed by a `Vec<Value>`, where:
-
-```rust
-enum Value {
-    Nil,
-    Str(String),
-    Int(i64),
-}
-```
-
-Operations ensure type safety and error handling for incorrect operations (e.g., popping an Int where a String is expected).
-
----
-
-## ❗ Errors & Diagnostics
-
-* **Redefinition of block** → Error at parse time.
-* **Invalid token** → Lexer-level error.
-* **Unknown identifier/macro** → Parsing error.
-* **Stack underflow or type mismatch** → Runtime error.
-* **Missing block (load/entry)** → Runtime error.
 
 ---
 
