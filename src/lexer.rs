@@ -355,7 +355,7 @@ impl<'src> Lexer<'src> {
 
     fn lex_macro(&mut self, begin: usize) -> Token {
         let mut buffer = String::new();
-        let mut kind = TokenKind::Macro;
+        let mut kind = TokenKind::MacroCall;
         let loc = self.loc();
         loop {
             let ch = self.read_char();
@@ -365,7 +365,7 @@ impl<'src> Lexer<'src> {
                     break;
                 }
                 b'(' => {
-                    kind = TokenKind::MacroWithArgs;
+                    kind = TokenKind::MacroCallWithArgs;
                     buffer.push(ch as char);
                     self.advance();
                     loop {
@@ -445,7 +445,7 @@ impl Token {
     }
 
     pub fn is_macro(&self) -> bool {
-        matches!(self.kind, TokenKind::Macro)
+        matches!(self.kind, TokenKind::MacroCall)
     }
 
     pub fn is_ident(&self) -> bool {
@@ -466,8 +466,8 @@ pub enum TokenKind {
     OpenBrace,
     CloseBrace,
 
-    Macro,
-    MacroWithArgs,
+    MacroCall,
+    MacroCallWithArgs,
 
     Identifier,
     Keyword,

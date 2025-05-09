@@ -53,6 +53,7 @@ fn parse_file<P: AsRef<Path>>(filepath: P) -> Result<HashMap<String, Block>, Str
     let source = fs::read_to_string(&filepath).map_err(|err| format!("{err}"))?;
     let mut l = PeekableLexer::new(&source);
     let mut blocks = HashMap::default();
+    let mut macros = HashMap::default();
 
     loop {
         let t = l.next_token();
@@ -61,11 +62,25 @@ fn parse_file<P: AsRef<Path>>(filepath: P) -> Result<HashMap<String, Block>, Str
         }
 
         match t.kind {
+            TokenKind::Identifier if t.source.as_str() == "macro" => {
+                let macro_name = expect_token(&mut l, TokenKind::Identifier)?.source;
+                let block: Block = parse_block(&mut l, &macros)?;
+
+                use std::collections::hash_map::Entry;
+                match macros.entry(macro_name.clone()) {
+                    Entry::Vacant(e) => {
+                        e.insert(block);
+                    }
+                    Entry::Occupied(_) => {
+                        error!("Redefinition of macro '{}'", macro_name);
+                    }
+                }
+            }
             TokenKind::Identifier => {
                 let block_name = t.source;
-                let block: Block = parse_block(&mut l)?;
-                use std::collections::hash_map::Entry;
+                let block: Block = parse_block(&mut l, &macros)?;
 
+                use std::collections::hash_map::Entry;
                 match blocks.entry(block_name.clone()) {
                     Entry::Vacant(e) => {
                         e.insert(block);
@@ -95,7 +110,10 @@ fn expect_token(l: &mut PeekableLexer<'_>, kind: TokenKind) -> Result<Token, Str
     Ok(token)
 }
 
-fn parse_block(l: &mut PeekableLexer<'_>) -> Result<Block, String> {
+fn parse_block(
+    l: &mut PeekableLexer<'_>,
+    macros: &HashMap<String, Block>,
+) -> Result<Block, String> {
     let mut block = Block::default();
     expect_token(l, TokenKind::OpenBrace)?;
     loop {
@@ -123,9 +141,15 @@ fn parse_block(l: &mut PeekableLexer<'_>) -> Result<Block, String> {
                 "concat" => block.commands.push(Command::Concat),
                 "readfile" => block.commands.push(Command::ReadFile),
                 "writefile" => block.commands.push(Command::WriteFile),
+                "exit" => block.commands.push(Command::Exit),
+                "debug" => block.commands.push(Command::Debug),
                 "if" => {
-                    let inner = parse_block(l)?;
+                    let inner = parse_block(l, macros)?;
                     block.commands.push(Command::If(inner.commands));
+                }
+                "ifnot" => {
+                    let inner = parse_block(l, macros)?;
+                    block.commands.push(Command::IfNot(inner.commands));
                 }
                 "load" => {
                     let id_token = expect_token(l, TokenKind::Identifier)?;
@@ -133,11 +157,25 @@ fn parse_block(l: &mut PeekableLexer<'_>) -> Result<Block, String> {
                 }
                 _ => error!("Unexpected identifier: {}", t.source),
             },
-            TokenKind::Macro => match t.source.as_str() {
+            TokenKind::MacroCall => match t.source.as_str() {
                 "log_shell" => block
                     .commands
                     .extend([Command::Dup, Command::Echo, Command::Shell]),
-                _ => error!("Unexpected macro: {}", t.source),
+                "log_fatal" => block.commands.extend([
+                    Command::PushStr("Error ".into()),
+                    Command::Swap,
+                    Command::Concat,
+                    Command::Echo,
+                    Command::PushInt(1),
+                    Command::Exit,
+                ]),
+                s => {
+                    if let Some(m) = macros.get(s) {
+                        block.commands.extend(m.commands.clone().into_iter());
+                    } else {
+                        error!("Unexpected macro: {}", t.source)
+                    }
+                }
             },
             _ => error!("Unexpected Token: {:?} '{}'", t.kind, t.source),
         }
@@ -154,7 +192,7 @@ struct Block {
     commands: Vec<Command>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Command {
     /// Run a shell cmd, pop a string from the stack
     /// and push stdout back to the stack
@@ -178,16 +216,19 @@ enum Command {
     ReadFile,
     /// Writes the top of stack (string) to a file, path below it
     WriteFile,
-    // Check if the top of stack is true and execute the block
+    /// Check if the top of stack is true and execute the block
     If(Vec<Command>),
-    // Load another block
+    /// Check if the top of stack is false and execute the block
+    IfNot(Vec<Command>),
+    /// Load another block
     Load(String),
+    /// Exit the program
+    Exit,
+    /// Prints the current stack
+    Debug,
 }
 
-fn resolve_dependencies(
-    blocks: &HashMap<String, Block>,
-    directive: &str,
-) -> Result<(), String> {
+fn resolve_dependencies(blocks: &HashMap<String, Block>, directive: &str) -> Result<(), String> {
     let mut seen = HashSet::new();
     let mut ordered = Vec::new();
 
@@ -248,6 +289,9 @@ fn run_cmd(
     cmd: &Command,
 ) -> Result<(), String> {
     match cmd {
+        Command::Debug => {
+            println!("DEBUG {:?}", stack.inner)
+        }
         Command::PushStr(s) => {
             stack.push(Value::Str(s.clone()));
         }
@@ -256,63 +300,69 @@ fn run_cmd(
             stack.push(Value::Int(*s));
         }
 
-        Command::Echo => match stack.pop_string() {
-            Ok(s) => println!("{}", s),
-            Err(err) => error!("{}", err),
-        },
+        Command::Echo => {
+            let msg: String = stack.pop()?.try_into()?;
+            println!("{msg}")
+        }
 
         Command::Dup => match stack.top() {
             Some(s) => stack.push(s.clone()),
             None => error!("Dup with a empty stack"),
         },
 
-        Command::Pop => match stack.pop() {
-            Some(_) => {}
-            None => error!("Pop with a empty stack"),
-        },
+        Command::Pop => {
+            stack.pop()?;
+        }
 
-        Command::Swap => match (stack.pop(), stack.pop()) {
-            (Some(a), Some(b)) => {
-                stack.push(b);
-                stack.push(a);
-            }
-            (None, _) | (_, None) => error!("Swap with less than 2 elements"),
-        },
+        Command::Swap => {
+            let a = stack.pop()?;
+            let b = stack.pop()?;
+            stack.push(a);
+            stack.push(b);
+        }
 
-        Command::Concat => match (stack.pop_string(), stack.pop_string()) {
-            (Ok(a), Ok(b)) => {
-                stack.push(Value::Str(b + a.as_str()));
-            }
-            (Err(err), _) | (_, Err(err)) => {
-                error!("Concat with less than 2 elements or {}", err)
-            }
-        },
+        Command::Concat => {
+            let b: String = stack.pop()?.try_into()?;
+            let a: String = stack.pop()?.try_into()?;
+            stack.push(Value::Str(a + b.as_str()));
+        }
 
-        Command::ReadFile => match stack.pop_string() {
-            Ok(path) => match fs::read_to_string(&path) {
+        Command::ReadFile => {
+            let path: String = stack.pop()?.try_into()?;
+            match fs::read_to_string(&path) {
                 Ok(content) => stack.push(Value::Str(content)),
                 Err(e) => error!("readfile error: {}", e),
-            },
-            Err(e) => error!("{}", e),
-        },
+            }
+        }
 
         Command::WriteFile => {
-            let content = stack.pop_string()?;
-            let path = stack.pop_string()?;
+            let content: String = stack.pop()?.try_into()?;
+            let path: String = stack.pop()?.try_into()?;
             match fs::write(&path, content) {
                 Ok(_) => {}
                 Err(e) => error!("writefile error: {}", e),
             }
         }
 
-        Command::If(cmds) => {
-            let cond = match stack.pop() {
-                Some(Value::Int(v)) => v,
-                Some(v) => error!("if expected Int on stack, got {}", v.type_name()),
-                None => error!("if with empty stack"),
-            };
+        Command::Exit => {
+            let code: i64 = stack.pop()?.try_into()?;
+            process::exit(code as i32);
+        }
 
-            if cond != 0 {
+        Command::If(cmds) => {
+            let cond: bool = stack.pop()?.try_into()?;
+
+            if cond {
+                for cmd in cmds {
+                    run_cmd(stack, blocks, cmd)?;
+                }
+            }
+        }
+
+        Command::IfNot(cmds) => {
+            let cond: bool = stack.pop()?.try_into()?;
+
+            if !cond {
                 for cmd in cmds {
                     run_cmd(stack, blocks, cmd)?;
                 }
@@ -329,35 +379,38 @@ fn run_cmd(
             }
         }
 
-        Command::Shell => match stack.pop_string() {
-            Ok(cmd) => match SysCommand::new("sh").arg("-c").arg(&cmd).output() {
+        Command::Shell => {
+            let cmd: String = stack.pop()?.try_into()?;
+            match SysCommand::new("sh").arg("-c").arg(&cmd).output() {
                 Ok(output) => {
                     if output.status.success() {
                         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        println!("Shell '{cmd}'\n{}", stdout)
+                        println!("Shell -> '{cmd}'");
+                        stack.push(Value::Str(stdout));
+                        stack.push(Value::Bool(true));
                     } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        error!("Shell '{cmd}'\nstderr:\n{}", stderr);
+                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                        println!("Shell -> '{cmd}'");
+                        stack.push(Value::Str(stderr));
+                        stack.push(Value::Bool(false));
                     }
                 }
                 Err(e) => {
                     error!("Failed to run shell: {}", e);
                 }
-            },
-            Err(err) => {
-                error!("{}", err)
             }
-        },
+        }
     }
     Ok(())
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum Value {
     #[default]
     Nil,
     Str(String),
     Int(i64),
+    Bool(bool),
 }
 
 impl Value {
@@ -366,6 +419,37 @@ impl Value {
             Value::Nil => "Nil",
             Value::Str(_) => "Str",
             Value::Int(_) => "Int",
+            Value::Bool(_) => "Bool",
+        }
+    }
+}
+
+impl TryFrom<Value> for String {
+    type Error = String;
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Str(s) => Ok(s),
+            v => Err(format!("expected string but got {}", v.type_name())),
+        }
+    }
+}
+
+impl TryFrom<Value> for i64 {
+    type Error = String;
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Int(s) => Ok(s),
+            v => Err(format!("expected int but got {}", v.type_name())),
+        }
+    }
+}
+
+impl TryFrom<Value> for bool {
+    type Error = String;
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Bool(s) => Ok(s),
+            v => Err(format!("expected bool but got {}", v.type_name())),
         }
     }
 }
@@ -380,14 +464,9 @@ impl Stack {
         self.inner.last()
     }
 
-    pub fn pop(&mut self) -> Option<Value> {
-        self.inner.pop()
-    }
-
-    pub fn pop_string(&mut self) -> Result<String, String> {
+    pub fn pop(&mut self) -> Result<Value, String> {
         match self.inner.pop() {
-            Some(Value::Str(s)) => Ok(s),
-            Some(v) => error!("expected string but got {}", v.type_name()),
+            Some(v) => Ok(v),
             None => error!("stack is empty."),
         }
     }
