@@ -1,49 +1,45 @@
-#![allow(unused)]
-use std::{
-    collections::HashMap,
-    env, fs,
-    path::PathBuf,
-    process::{self, exit},
-};
+use clap::Parser;
+use lexer::{PeekableLexer, Token, TokenKind};
+use std::path::Path;
+use std::{collections::HashMap, fs, process};
 
-use lexer::{Lexer, PeekableLexer, Token, TokenKind};
-
+pub mod cli;
 pub mod lexer;
 
 fn main() {
-    if let Err(err) = run_app() {
-        eprintln!("Error: {}", err);
+    let cli = cli::Cli::parse();
+
+    if !cli.file.exists() {
+        eprintln!("File '{}' does not exist.", cli.file.display());
         process::exit(1);
     }
-}
 
-fn run_app() -> Result<(), String> {
-    let mut args = env::args();
+    let blocks = match parse_file(&cli.file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Parse error: {}", e);
+            process::exit(1);
+        }
+    };
 
-    let program = args
-        .next()
-        .ok_or_else(|| "Failed to retrieve the program name.".to_string())?;
+    match &cli.command {
+        cli::Command::Run { directive } => {
+            if cli.verbose {
+                println!("Running directive: {}", directive);
+            }
 
-    let directive = args.next().ok_or_else(|| {
-        format!(
-            "No directive provided.\nUsage: {} <directive> [FILE]",
-            program
-        )
-    })?;
-
-    let filepath: String = args.next().unwrap_or_else(|| ".proj".into());
-
-    let path = PathBuf::from(&filepath);
-    if !path.exists() {
-        return Err(format!("File '{}' does not exist.", filepath));
+            if let Err(e) = run_commands(directive.clone(), blocks) {
+                eprintln!("Execution error: {}", e);
+                process::exit(1);
+            }
+        }
+        cli::Command::List => {
+            println!("Available directives:");
+            for name in blocks.keys() {
+                println!("- {}", name);
+            }
+        }
     }
-
-    let blocks =
-        parse_file(&filepath).map_err(|e| format!("Failed to parse file '{}': {}", filepath, e))?;
-
-    run_commands(directive, blocks)?;
-
-    Ok(())
 }
 
 macro_rules! error {
@@ -52,7 +48,7 @@ macro_rules! error {
     }};
 }
 
-fn parse_file(filepath: &str) -> Result<HashMap<String, Block>, String> {
+fn parse_file<P: AsRef<Path>>(filepath: P) -> Result<HashMap<String, Block>, String> {
     let source = fs::read_to_string(&filepath).map_err(|err| format!("{err}"))?;
     let mut l = PeekableLexer::new(&source);
     let mut blocks = HashMap::default();
@@ -211,7 +207,7 @@ fn run_cmd(
         }
 
         Command::PushInt(s) => {
-            stack.push(Value::Int(s.clone()));
+            stack.push(Value::Int(*s));
         }
 
         Command::Echo => match stack.pop_string() {
@@ -243,9 +239,6 @@ fn run_cmd(
             }
             (Err(err), _) | (_, Err(err)) => {
                 error!("Concat with less than 2 elements or {}", err)
-            }
-            (Err(err1), Err(err2)) => {
-                error!("Concat with a empty stack: {} and {}", err1, err2)
             }
         },
 
@@ -347,7 +340,7 @@ impl Stack {
 
     pub fn pop_string(&mut self) -> Result<String, String> {
         match self.inner.pop() {
-            Some(Value::Str(s)) => return Ok(s),
+            Some(Value::Str(s)) => Ok(s),
             Some(v) => error!("expected string but got {}", v.type_name()),
             None => error!("stack is empty."),
         }
