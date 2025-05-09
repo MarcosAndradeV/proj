@@ -1,0 +1,7 @@
+main {
+    load hello
+}
+
+hello {
+    "Hello" echo
+}
