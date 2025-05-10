@@ -23,13 +23,13 @@ fn main() {
         }
     };
 
-    match &cli.command {
+    match cli.command {
         cli::Command::Run { directive } => {
             if cli.verbose {
                 println!("Running directive: {}", directive);
             }
 
-            if let Err(e) = run_commands(directive.clone(), blocks) {
+            if let Err(e) = run_commands(directive, blocks) {
                 eprintln!("Execution error: {}", e);
                 process::exit(1);
             }
@@ -145,14 +145,17 @@ fn parse_block(
                 "debug" => block.commands.push(Command::Debug),
                 "if" => {
                     let inner = parse_block(l, macros)?;
+                    block.deps.extend(inner.deps.into_iter());
                     block.commands.push(Command::If(inner.commands));
                 }
                 "ifnot" => {
                     let inner = parse_block(l, macros)?;
+                    block.deps.extend(inner.deps.into_iter());
                     block.commands.push(Command::IfNot(inner.commands));
                 }
                 "load" => {
                     let id_token = expect_token(l, TokenKind::Identifier)?;
+                    block.deps.push(id_token.source.clone());
                     block.commands.push(Command::Load(id_token.source));
                 }
                 _ => error!("Unexpected identifier: {}", t.source),
@@ -189,6 +192,7 @@ use std::str;
 
 #[derive(Debug, Default)]
 struct Block {
+    deps: Vec<String>,
     commands: Vec<Command>,
 }
 
@@ -250,13 +254,8 @@ fn resolve_dependencies(blocks: &HashMap<String, Block>, directive: &str) -> Res
 
         match blocks.get(directive) {
             Some(b) => {
-                for c in b.commands.iter() {
-                    match c {
-                        Command::Load(dep) => {
-                            resolve_dependencies_impl(blocks, dep, seen, ordered)?;
-                        }
-                        _ => {}
-                    }
+                for dep in b.deps.iter() {
+                    resolve_dependencies_impl(blocks, dep, seen, ordered)?;
                 }
                 ordered.push(directive.into());
                 Ok(())
@@ -373,9 +372,9 @@ fn run_cmd(
             let Some(b) = blocks.get(block_name) else {
                 error!("load block '{}' not found", block_name);
             };
-
+            let mut stack = Stack::default();
             for cmd in &b.commands {
-                run_cmd(stack, blocks, cmd)?;
+                run_cmd(&mut stack, blocks, cmd)?;
             }
         }
 
