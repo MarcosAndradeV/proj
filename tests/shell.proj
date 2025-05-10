@@ -1,5 +1,8 @@
+
+log_fatal {  "Error " swap concat echo 1 exit }
+
 main {
-    "echo Hello" shell ifnot {
+    "echo Hello" shell not if {
         @log_fatal
     }
     echo

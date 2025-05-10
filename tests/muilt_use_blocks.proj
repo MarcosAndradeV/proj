@@ -1,0 +1,9 @@
+hello {
+    "Hello, world" echo
+}
+
+main {
+    @hello
+    load hello
+    call hello
+}

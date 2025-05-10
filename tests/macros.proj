@@ -1,4 +1,4 @@
-macro hello { "Hello" echo }
+hello { "Hello" echo }
 
 main {
     @hello
