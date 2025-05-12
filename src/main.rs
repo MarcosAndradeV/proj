@@ -138,17 +138,23 @@ fn parse_block(
                     block.deps.extend(inner.deps.into_iter());
                     block.commands.push(Command::If(inner.commands));
                 }
-                "load" => {
-                    let id_token = expect_token(l, TokenKind::Identifier)?;
-                    block.deps.push(id_token.source.clone());
-                    block.commands.push(Command::Load(id_token.source));
+                "while" => {
+                    let inner = parse_block(l, blocks)?;
+                    block.deps.extend(inner.deps.into_iter());
+                    block.commands.push(Command::While(inner.commands));
                 }
                 "call" => {
                     let id_token = expect_token(l, TokenKind::Identifier)?;
                     block.deps.push(id_token.source.clone());
                     block.commands.push(Command::Call(id_token.source));
                 }
-                _ => error!("Unexpected identifier: {}", t.source),
+                "let" => {
+                    let id_token = expect_token(l, TokenKind::Identifier)?;
+                    block.commands.push(Command::Store(id_token.source));
+                }
+                _ => {
+                    block.commands.push(Command::LoadVar(t.source));
+                }
             },
             TokenKind::MacroCall => {
                 if let Some(m) = blocks.get(t.source.as_str()) {
@@ -166,6 +172,12 @@ fn parse_block(
 
 use std::process::Command as SysCommand;
 use std::str;
+
+#[derive(Debug, Default)]
+struct ExecutionEnv {
+    stack: Stack,
+    vars: HashMap<String, Value>,
+}
 
 #[derive(Debug, Default)]
 struct Block {
@@ -201,14 +213,18 @@ enum Command {
     WriteFile,
     /// Check if the top of stack is true and execute the block
     If(Vec<Command>),
-    /// Load another block
-    Load(String),
+    /// While
+    While(Vec<Command>),
     /// Call another block
     Call(String),
     /// Exit the program
     Exit,
     /// Prints the current stack
     Debug,
+    /// Store
+    Store(String),
+    /// Load
+    LoadVar(String),
 }
 
 fn resolve_dependencies(blocks: &HashMap<String, Block>, directive: &str) -> Result<(), String> {
@@ -247,7 +263,7 @@ fn resolve_dependencies(blocks: &HashMap<String, Block>, directive: &str) -> Res
 }
 
 fn run_commands(directive: String, blocks: HashMap<String, Block>) -> Result<(), String> {
-    let mut stack = Stack::default();
+    let mut env = ExecutionEnv::default();
 
     let Some(block) = blocks.get(&directive) else {
         error!("Directive '{}' not found.", directive);
@@ -256,72 +272,72 @@ fn run_commands(directive: String, blocks: HashMap<String, Block>) -> Result<(),
     resolve_dependencies(&blocks, &directive)?;
 
     for cmd in &block.commands {
-        run_cmd(&mut stack, &blocks, cmd)?;
+        run_cmd(cmd, &mut env, &blocks)?;
     }
     Ok(())
 }
 
 fn run_cmd(
-    stack: &mut Stack,
-    blocks: &HashMap<String, Block>,
     cmd: &Command,
+    env: &mut ExecutionEnv,
+    blocks: &HashMap<String, Block>,
 ) -> Result<(), String> {
     match cmd {
         Command::Debug => {
-            println!("DEBUG {:?}", stack.inner)
+            println!("DEBUG {:?}", env.stack.inner)
         }
 
         Command::PushStr(s) => {
-            stack.push(Value::Str(s.clone()));
+            env.stack.push(Value::Str(s.clone()));
         }
 
         Command::PushInt(s) => {
-            stack.push(Value::Int(*s));
+            env.stack.push(Value::Int(*s));
         }
 
         Command::Echo => {
-            let msg: String = stack.pop()?.try_into()?;
+            let msg: String = env.stack.pop()?.try_into()?;
             println!("{msg}")
         }
 
-        Command::Dup => match stack.top() {
-            Some(s) => stack.push(s.clone()),
+        Command::Dup => match env.stack.top() {
+            Some(s) => env.stack.push(s.clone()),
             None => error!("Dup with a empty stack"),
         },
 
         Command::Pop => {
-            stack.pop()?;
+            env.stack.pop()?;
         }
 
         Command::Swap => {
-            let a = stack.pop()?;
-            let b = stack.pop()?;
-            stack.push(a);
-            stack.push(b);
+            let a = env.stack.pop()?;
+            let b = env.stack.pop()?;
+            env.stack.push(a);
+            env.stack.push(b);
         }
 
         Command::Concat => {
-            let b: String = stack.pop()?.try_into()?;
-            let a: String = stack.pop()?.try_into()?;
-            stack.push(Value::Str(a + b.as_str()));
+            let b: String = env.stack.pop()?.try_into()?;
+            let a: String = env.stack.pop()?.try_into()?;
+            env.stack.push(Value::Str(a + b.as_str()));
         }
 
         Command::Not => {
-            let a: bool = stack.pop()?.try_into()?;
-            stack.push(Value::Bool(!a));
+            let a: bool = env.stack.pop()?.try_into()?;
+            env.stack.push(Value::Bool(!a));
         }
 
         Command::ReadFile => {
-            let path: String = stack.pop()?.try_into()?;
+            let path: String = env.stack.pop()?.try_into()?;
             match fs::read_to_string(&path) {
-                Ok(content) => stack.push(Value::Str(content)),
+                Ok(content) => env.stack.push(Value::Str(content)),
                 Err(e) => error!("readfile error: {}", e),
             }
         }
 
         Command::WriteFile => {
-            let content: String = stack.pop()?.try_into()?;
-            let path: String = stack.pop()?.try_into()?;
+            let content: String = env.stack.pop()?.try_into()?;
+            let path: String = env.stack.pop()?.try_into()?;
             match fs::write(&path, content) {
                 Ok(_) => {}
                 Err(e) => error!("writefile error: {}", e),
@@ -329,53 +345,64 @@ fn run_cmd(
         }
 
         Command::Exit => {
-            let code: i64 = stack.pop()?.try_into()?;
+            let code: i64 = env.stack.pop()?.try_into()?;
             process::exit(code as i32);
         }
 
         Command::If(cmds) => {
-            let cond: bool = stack.pop()?.try_into()?;
+            let cond: bool = env.stack.pop()?.try_into()?;
 
             if cond {
                 for cmd in cmds {
-                    run_cmd(stack, blocks, cmd)?;
+                    run_cmd(cmd, env, blocks)?;
                 }
             }
         }
 
-        Command::Load(block_name) => {
-            let Some(b) = blocks.get(block_name) else {
-                error!("load block '{}' not found", block_name);
-            };
-            let mut stack = Stack::default();
-            for cmd in &b.commands {
-                run_cmd(&mut stack, blocks, cmd)?;
+        Command::While(cmds) => loop {
+            let cond: bool = env.stack.pop()?.try_into()?;
+
+            if !cond {
+                break;
             }
-        }
+            for cmd in cmds {
+                run_cmd(cmd, env, blocks)?;
+            }
+        },
 
         Command::Call(block_name) => {
             let Some(b) = blocks.get(block_name) else {
                 error!("call block '{}' not found", block_name);
             };
             for cmd in &b.commands {
-                run_cmd(stack, blocks, cmd)?;
+                run_cmd(cmd, env, blocks)?;
             }
         }
 
+        Command::Store(var) => {
+            let v = env.stack.pop()?;
+            env.vars.insert(var.clone(), v);
+        }
+
+        Command::LoadVar(var) => {
+            let v = env.vars.get(var).cloned().unwrap();
+            env.stack.push(v);
+        }
+
         Command::Shell => {
-            let cmd: String = stack.pop()?.try_into()?;
+            let cmd: String = env.stack.pop()?.try_into()?;
             match SysCommand::new("sh").arg("-c").arg(&cmd).output() {
                 Ok(output) => {
                     if output.status.success() {
                         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                         println!("Shell -> '{cmd}'");
-                        stack.push(Value::Str(stdout));
-                        stack.push(Value::Bool(true));
+                        env.stack.push(Value::Str(stdout));
+                        env.stack.push(Value::Bool(true));
                     } else {
                         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                         println!("Shell -> '{cmd}'");
-                        stack.push(Value::Str(stderr));
-                        stack.push(Value::Bool(false));
+                        env.stack.push(Value::Str(stderr));
+                        env.stack.push(Value::Bool(false));
                     }
                 }
                 Err(e) => {
